@@ -1,5 +1,16 @@
 const crypto = require('crypto');
-const { load, save, MIN_OFFSET, MAX_OFFSET, MIN_YEAR, MAX_YEAR, MAX_NAME_LENGTH, MAX_DISPLAY_NAME_LENGTH, MAX_NOTE_LENGTH } = require('./store');
+const {
+  load,
+  save,
+  MIN_OFFSET,
+  MAX_OFFSET,
+  MIN_YEAR,
+  MAX_YEAR,
+  MAX_SEGMENTS,
+  MAX_NAME_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
+  MAX_NOTE_LENGTH,
+} = require('./store');
 const { ApiError, pickText } = require('./errors');
 
 // 时区名固定成地区加城市的写法，UTC 单独允许
@@ -73,7 +84,7 @@ function sameRulePart(a, b) {
     && a.hour === b.hour && a.minute === b.minute;
 }
 
-function validateYear(value, field, label) {
+function parseYearValue(value, field, label) {
   if (value === undefined || value === null || value === '') return null;
   const year = Number(value);
   if (!Number.isInteger(year) || year < MIN_YEAR || year > MAX_YEAR) {
@@ -91,18 +102,126 @@ function validateNote(value) {
   return value.trim();
 }
 
-// 一整条档案的校验：偏移、夏令时三段与生效年份要能对得上
+// 年份区间的展示写法
+function segmentYearsText(segment) {
+  return segment.toYear === null ? `${segment.fromYear} 年起` : `${segment.fromYear} 至 ${segment.toYear} 年`;
+}
+
+// 分段里某一行的字段名，报错时指到具体那一段的那一格
+function segmentField(index, key) {
+  return `segments[${index}].${key}`;
+}
+
+// 校验一条档案的分段表：至少一段、每段年份合法、段与段首尾相接，
+// 不允许重叠、不允许留空洞，开口（至今）段最多一段且只能是最后一段。
+// 出错时把撞上的两段年份、或者空着的年份范围直接写在说明里。
+function validateSegments(input) {
+  const rawList = input.segments;
+  if (rawList === undefined || rawList === null) {
+    // 没有带分段表时，回退到顶层的偏移与生效年份单段写法
+    const offsetMinutes = validateOffset(input.offsetMinutes, 'offsetMinutes');
+    const fromYear = parseYearValue(input.fromYear, 'fromYear', '开始年份');
+    const toYear = parseYearValue(input.toYear, 'toYear', '结束年份');
+    const start = fromYear === null ? MIN_YEAR : fromYear;
+    if (toYear !== null && toYear < start) {
+      throw new ApiError(400, 'YEAR_RANGE_INVALID', '结束年份不能早于开始年份', 'toYear');
+    }
+    return { segments: [{ fromYear: start, toYear, offsetMinutes }] };
+  }
+  if (!Array.isArray(rawList) || rawList.length === 0) {
+    throw new ApiError(400, 'SEGMENTS_REQUIRED', '至少要登记一段偏移区间，写清开始年份与这段期间的偏移', 'segments');
+  }
+  if (rawList.length > MAX_SEGMENTS) {
+    throw new ApiError(400, 'SEGMENTS_TOO_MANY', `偏移分段最多登记 ${MAX_SEGMENTS} 段`, 'segments');
+  }
+
+  const segments = rawList.map((raw, index) => {
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const fromYear = parseYearValue(source.fromYear, segmentField(index, 'fromYear'), `第 ${index + 1} 段的开始年份`);
+    if (fromYear === null) {
+      throw new ApiError(400, 'SEGMENT_YEAR_REQUIRED', `第 ${index + 1} 段还没填开始年份`, segmentField(index, 'fromYear'));
+    }
+    const toYear = parseYearValue(source.toYear, segmentField(index, 'toYear'), `第 ${index + 1} 段的结束年份`);
+    if (toYear !== null && toYear < fromYear) {
+      throw new ApiError(
+        400,
+        'SEGMENT_RANGE_INVALID',
+        `第 ${index + 1} 段的结束年份 ${toYear} 早于开始年份 ${fromYear}`,
+        segmentField(index, 'toYear'),
+      );
+    }
+    const offsetMinutes = validateOffset(source.offsetMinutes, segmentField(index, 'offsetMinutes'));
+    return { fromYear, toYear, offsetMinutes };
+  });
+
+  const sorted = segments
+    .map((segment, index) => ({ ...segment, index }))
+    .sort((a, b) => {
+      if (a.fromYear !== b.fromYear) return a.fromYear - b.fromYear;
+      if (a.toYear === null) return 1;
+      if (b.toYear === null) return -1;
+      return a.toYear - b.toYear;
+    });
+
+  sorted.forEach((segment, order) => {
+    // 开口段只能有一段，而且必须落在所有段的最后
+    if (segment.toYear === null && order !== sorted.length - 1) {
+      throw new ApiError(
+        400,
+        'SEGMENT_OPEN_NOT_LAST',
+        `第 ${segment.index + 1} 段（${segment.fromYear} 年起）没有结束年份，至今段只能是最后一段`,
+        segmentField(segment.index, 'toYear'),
+      );
+    }
+  });
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prev = sorted[i - 1];
+    const current = sorted[i];
+    if (prev.toYear === null) {
+      // 理论上前面的开口段拦截已覆盖，这里再兜一层
+      throw new ApiError(
+        400,
+        'SEGMENT_OVERLAP',
+        `第 ${prev.index + 1} 段 ${segmentYearsText(prev)} 没有结束年份，和第 ${current.index + 1} 段从 ${current.fromYear} 年开始撞在一起`,
+        segmentField(current.index, 'fromYear'),
+      );
+    }
+    if (current.fromYear <= prev.toYear) {
+      throw new ApiError(
+        400,
+        'SEGMENT_OVERLAP',
+        `第 ${prev.index + 1} 段（${segmentYearsText(prev)}）与第 ${current.index + 1} 段（${segmentYearsText(current)}）在 ${current.fromYear} 至 ${prev.toYear} 年重叠`,
+        segmentField(current.index, 'fromYear'),
+      );
+    }
+    if (current.fromYear > prev.toYear + 1) {
+      throw new ApiError(
+        400,
+        'SEGMENT_GAP',
+        `第 ${prev.index + 1} 段到 ${prev.toYear} 年结束，第 ${current.index + 1} 段从 ${current.fromYear} 年才开始，中间 ${prev.toYear + 1} 至 ${current.fromYear - 1} 年没有任何分段覆盖`,
+        segmentField(current.index, 'fromYear'),
+      );
+    }
+  }
+
+  return { segments: sorted.map(({ fromYear, toYear, offsetMinutes }) => ({ fromYear, toYear, offsetMinutes })) };
+}
+
+// 一整条档案的校验：偏移分段、夏令时三段与生效年份要能对得上
 function validatePayload(input, data, selfId) {
   const name = validateName(input.name, data, selfId);
   const displayName = validateDisplayName(input.displayName);
-  const offsetMinutes = validateOffset(input.offsetMinutes, 'offsetMinutes');
   const usesDst = input.usesDst === true || input.usesDst === 'true';
-  const fromYear = validateYear(input.fromYear, 'fromYear', '开始年份');
-  const toYear = validateYear(input.toYear, 'toYear', '结束年份');
 
-  if (fromYear !== null && toYear !== null && toYear < fromYear) {
-    throw new ApiError(400, 'YEAR_RANGE_INVALID', '结束年份不能早于开始年份', 'toYear');
-  }
+  const checkedSegments = validateSegments(input);
+  const segments = checkedSegments.segments;
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  // 顶层字段从分段表反推：整体生效年份取首尾，当前偏移取最后一段
+  const fromYear = first.fromYear;
+  const toYear = last.toYear;
+  const offsetMinutes = last.offsetMinutes;
 
   let dstOffsetMinutes = null;
   let dstStart = null;
@@ -111,7 +230,7 @@ function validatePayload(input, data, selfId) {
   if (usesDst) {
     dstOffsetMinutes = validateOffset(input.dstOffsetMinutes, 'dstOffsetMinutes');
     if (dstOffsetMinutes <= offsetMinutes) {
-      throw new ApiError(400, 'DST_OFFSET_INVALID', '夏令时偏移要比标准偏移更靠前，也就是数值更大', 'dstOffsetMinutes');
+      throw new ApiError(400, 'DST_OFFSET_INVALID', `夏令时偏移要比当前标准偏移（${offsetMinutes} 分钟）更靠前，也就是数值更大`, 'dstOffsetMinutes');
     }
     if (!input.dstStart || !input.dstEnd) {
       throw new ApiError(400, 'DST_RULE_REQUIRED', '实行夏令时的时区要把开始与结束两段规则都填上', 'dstStart');
@@ -127,11 +246,12 @@ function validatePayload(input, data, selfId) {
     name,
     displayName,
     offsetMinutes,
+    segments,
     usesDst,
     dstOffsetMinutes,
     dstStart,
     dstEnd,
-    fromYear: fromYear === null ? MIN_YEAR : fromYear,
+    fromYear,
     toYear,
     note: validateNote(input.note),
   };
@@ -146,12 +266,44 @@ function offsetText(minutes) {
   return `UTC${sign}${hour}:${minute}`;
 }
 
+// 给出这条时区在某一年的实际偏移；年份没有被任何分段覆盖时返回不可用说明
+function offsetInYear(zone, year) {
+  const segment = zone.segments.find((item) => year >= item.fromYear && (item.toYear === null || year <= item.toYear));
+  if (!segment) {
+    const first = zone.segments[0];
+    const last = zone.segments[zone.segments.length - 1];
+    let reason;
+    if (year < first.fromYear) {
+      reason = `${year} 年早于这条时区最早的分段开始年份 ${first.fromYear} 年，没有登记这段期间的偏移`;
+    } else if (last.toYear !== null && year > last.toYear) {
+      reason = `${year} 年晚于最后一段的结束年份 ${last.toYear} 年，这之后没有登记偏移`;
+    } else {
+      reason = `${year} 年没有落在任何已登记的分段内`;
+    }
+    return { available: false, reason, segment: null, offsetMinutes: null, offsetText: '' };
+  }
+  return {
+    available: true,
+    reason: '',
+    segment,
+    offsetMinutes: segment.offsetMinutes,
+    offsetText: offsetText(segment.offsetMinutes),
+  };
+}
+
 function withOffsetText(zone) {
+  const segments = zone.segments.map((segment) => ({
+    ...segment,
+    offsetText: offsetText(segment.offsetMinutes),
+    yearsText: segmentYearsText(segment),
+  }));
   return {
     ...zone,
     offsetText: offsetText(zone.offsetMinutes),
     dstOffsetText: zone.usesDst && zone.dstOffsetMinutes !== null ? offsetText(zone.dstOffsetMinutes) : '',
-    yearRangeText: zone.toYear === null ? `${zone.fromYear} 年起` : `${zone.fromYear} 至 ${zone.toYear}`,
+    yearRangeText: zone.toYear === null ? `${zone.fromYear} 年起` : `${zone.fromYear} 至 ${zone.toYear} 年`,
+    segmentCount: segments.length,
+    segments,
   };
 }
 
@@ -193,6 +345,43 @@ function getZone(id) {
   return withOffsetText(found);
 }
 
+// 按年份查这条时区的实际偏移：年份落在哪一段就取哪一段，没落到段上按不可用处理
+function getZoneOffsetInYear(id, yearValue) {
+  const data = load();
+  const found = data.zones.find((item) => item.id === id);
+  if (!found) throw new ApiError(404, 'ZONE_NOT_FOUND', '这条时区档案不存在或已被删除', '');
+  const year = parseYearValue(yearValue, 'year', '要查询的年份');
+  if (year === null) throw new ApiError(400, 'YEAR_REQUIRED', '请填写要查询的年份', 'year');
+
+  const lookup = offsetInYear(found, year);
+  if (!lookup.available) {
+    return {
+      zoneId: found.id,
+      name: found.name,
+      displayName: found.displayName,
+      year,
+      available: false,
+      reason: lookup.reason,
+      offsetMinutes: null,
+      offsetText: '',
+      segment: null,
+      segmentYearsText: '',
+    };
+  }
+  return {
+    zoneId: found.id,
+    name: found.name,
+    displayName: found.displayName,
+    year,
+    available: true,
+    reason: '',
+    offsetMinutes: lookup.offsetMinutes,
+    offsetText: lookup.offsetText,
+    segment: lookup.segment,
+    segmentYearsText: segmentYearsText(lookup.segment),
+  };
+}
+
 function createZone(payload) {
   const input = payload && typeof payload === 'object' ? payload : {};
   const data = load();
@@ -213,15 +402,22 @@ function updateZone(id, payload) {
   const merged = {
     name: input.name === undefined ? found.name : input.name,
     displayName: input.displayName === undefined ? found.displayName : input.displayName,
-    offsetMinutes: input.offsetMinutes === undefined ? found.offsetMinutes : input.offsetMinutes,
     usesDst: input.usesDst === undefined ? found.usesDst : (input.usesDst === true || input.usesDst === 'true'),
     dstOffsetMinutes: input.dstOffsetMinutes === undefined ? found.dstOffsetMinutes : input.dstOffsetMinutes,
     dstStart: input.dstStart === undefined ? found.dstStart : input.dstStart,
     dstEnd: input.dstEnd === undefined ? found.dstEnd : input.dstEnd,
-    fromYear: input.fromYear === undefined ? found.fromYear : input.fromYear,
-    toYear: input.toYear === undefined ? found.toYear : input.toYear,
     note: input.note === undefined ? found.note : input.note,
   };
+  // 分段表整体替换；没有带分段表时，沿用旧的分段（或旧的顶层单段写法）
+  if (input.segments !== undefined) {
+    merged.segments = input.segments;
+  } else if (found.segments && found.segments.length) {
+    merged.segments = found.segments;
+  } else {
+    merged.offsetMinutes = input.offsetMinutes === undefined ? found.offsetMinutes : input.offsetMinutes;
+    merged.fromYear = input.fromYear === undefined ? found.fromYear : input.fromYear;
+    merged.toYear = input.toYear === undefined ? found.toYear : input.toYear;
+  }
 
   const checked = validatePayload(merged, data, found.id);
   Object.assign(found, checked);
@@ -242,9 +438,12 @@ function deleteZone(id) {
 module.exports = {
   listZones,
   getZone,
+  getZoneOffsetInYear,
   createZone,
   updateZone,
   deleteZone,
   offsetText,
+  offsetInYear,
+  segmentYearsText,
   withOffsetText,
 };

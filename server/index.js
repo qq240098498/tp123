@@ -36,6 +36,15 @@ app.get('/api/zones/:id', (req, res) => {
   }
 });
 
+// 按年份查一条时区在那一年实际落在哪一段、用的是哪个偏移
+app.get('/api/zones/:id/offset', (req, res) => {
+  try {
+    res.json(api.getZoneOffsetInYear(req.params.id, api.readQuery(req.query, 'year')));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.patch('/api/zones/:id', (req, res) => {
   try {
     res.json(api.updateZone(req.params.id, req.body));

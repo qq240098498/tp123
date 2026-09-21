@@ -1,6 +1,6 @@
 const { load, WEEKDAY_NAMES } = require('./store');
 const { ApiError, pickText } = require('./errors');
-const { offsetText } = require('./zones');
+const { offsetText, offsetInYear } = require('./zones');
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -55,7 +55,12 @@ function dayOffsetText(dayOffset) {
   return `前 ${Math.abs(dayOffset)} 天`;
 }
 
-// 换算：先把输入时刻按来源时区的偏移折算成基准时刻，再逐个时区加上各自的偏移
+function segmentYearsText(segment) {
+  return segment.toYear === null ? `${segment.fromYear} 年起` : `${segment.fromYear} 至 ${segment.toYear} 年`;
+}
+
+// 换算：先按输入年份落在来源时区的哪一段取偏移，把输入时刻折算成基准时刻，
+// 再逐个时区按同一年落段取偏移加上去；年份没有被分段覆盖的时区按不可用处理
 function convert(options) {
   const input = options && typeof options === 'object' ? options : {};
   const date = validateDate(input.date);
@@ -67,22 +72,60 @@ function convert(options) {
   const source = data.zones.find((item) => item.id === zoneId);
   if (!source) throw new ApiError(404, 'ZONE_NOT_FOUND', '选中的时区没有登记过', 'zoneId');
 
+  const sourceOffset = offsetInYear(source, date.year);
+  if (!sourceOffset.available) {
+    throw new ApiError(
+      409,
+      'ZONE_UNAVAILABLE_IN_YEAR',
+      `来源时区 ${source.name} 在 ${date.year} 年不可用：${sourceOffset.reason}`,
+      'date',
+    );
+  }
+  const sourceMinutes = sourceOffset.offsetMinutes;
+
   const baseMs = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute);
-  const utcMs = baseMs - source.offsetMinutes * 60000;
+  const utcMs = baseMs - sourceMinutes * 60000;
   const baseDay = Math.floor(baseMs / DAY_MS);
   const utcDate = new Date(utcMs);
 
   const results = data.zones.map((zone) => {
-    const localMs = utcMs + zone.offsetMinutes * 60000;
-    const local = new Date(localMs);
-    const dayOffset = Math.floor(localMs / DAY_MS) - baseDay;
-    const diffMinutes = zone.offsetMinutes - source.offsetMinutes;
-    return {
+    const lookup = offsetInYear(zone, date.year);
+    const common = {
       zoneId: zone.id,
       name: zone.name,
       displayName: zone.displayName,
-      offsetMinutes: zone.offsetMinutes,
-      offsetText: offsetText(zone.offsetMinutes),
+      usesDst: zone.usesDst,
+      isSource: zone.id === source.id,
+      year: date.year,
+    };
+    if (!lookup.available) {
+      return {
+        ...common,
+        available: false,
+        unavailableReason: lookup.reason,
+        offsetMinutes: null,
+        offsetText: '',
+        segmentYearsText: '',
+        localDate: '',
+        localTime: '',
+        weekday: '',
+        dayOffset: null,
+        dayOffsetText: '不可用',
+        diffMinutes: null,
+        diffText: lookup.reason,
+      };
+    }
+    const localMs = utcMs + lookup.offsetMinutes * 60000;
+    const local = new Date(localMs);
+    const dayOffset = Math.floor(localMs / DAY_MS) - baseDay;
+    const diffMinutes = lookup.offsetMinutes - sourceMinutes;
+    return {
+      ...common,
+      available: true,
+      unavailableReason: '',
+      offsetMinutes: lookup.offsetMinutes,
+      offsetText: offsetText(lookup.offsetMinutes),
+      segmentYearsText: segmentYearsText(lookup.segment),
       localDate: `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())}`,
       localTime: `${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`,
       weekday: WEEKDAY_NAMES[local.getUTCDay()],
@@ -90,24 +133,30 @@ function convert(options) {
       dayOffsetText: dayOffsetText(dayOffset),
       diffMinutes,
       diffText: diffText(diffMinutes),
-      usesDst: zone.usesDst,
-      isSource: zone.id === source.id,
     };
   });
 
-  results.sort((a, b) => {
+  const availableResults = results.filter((item) => item.available);
+  const unavailableResults = results.filter((item) => !item.available);
+
+  availableResults.sort((a, b) => {
     if (a.offsetMinutes !== b.offsetMinutes) return a.offsetMinutes - b.offsetMinutes;
     return a.name < b.name ? -1 : 1;
   });
+  unavailableResults.sort((a, b) => (a.name < b.name ? -1 : 1));
+
+  const sortedResults = [...availableResults, ...unavailableResults];
 
   return {
     input: {
       date: date.text,
       time: time.text,
+      year: date.year,
       zoneId: source.id,
       zoneName: source.name,
       zoneDisplayName: source.displayName,
-      offsetText: offsetText(source.offsetMinutes),
+      offsetText: offsetText(sourceMinutes),
+      sourceSegmentYearsText: segmentYearsText(sourceOffset.segment),
       usesDst: source.usesDst,
     },
     standard: {
@@ -115,9 +164,11 @@ function convert(options) {
       time: `${pad(utcDate.getUTCHours())}:${pad(utcDate.getUTCMinutes())}`,
     },
     zonesInScope: data.zones.length,
-    crossDayCount: results.filter((item) => item.dayOffset !== 0).length,
-    maxDiffMinutes: results.reduce((acc, item) => Math.max(acc, Math.abs(item.diffMinutes)), 0),
-    results,
+    availableCount: availableResults.length,
+    unavailableCount: unavailableResults.length,
+    crossDayCount: availableResults.filter((item) => item.dayOffset !== 0).length,
+    maxDiffMinutes: availableResults.reduce((acc, item) => Math.max(acc, Math.abs(item.diffMinutes)), 0),
+    results: sortedResults,
     convertedAt: new Date().toISOString(),
   };
 }

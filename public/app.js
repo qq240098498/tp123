@@ -4,6 +4,8 @@ const state = {
   zones: [],
   counts: { total: 0, dstCount: 0, noDstCount: 0 },
   editingId: '',
+  detailId: '',
+  formSegments: [],
   lastConvert: null,
 };
 
@@ -144,9 +146,10 @@ function renderZones() {
       <td>${item.usesDst ? '<span class="tag on">实行</span>' : '<span class="tag off">不实行</span>'}</td>
       <td class="mono">${item.dstOffsetText ? escapeHtml(item.dstOffsetText) : '—'}</td>
       <td class="rule-cell">${item.usesDst ? `${escapeHtml(ruleText(item.dstStart))} 起，${escapeHtml(ruleText(item.dstEnd))} 止` : '—'}</td>
-      <td class="mono">${escapeHtml(item.yearRangeText)}</td>
+      <td class="seg-cell"><span class="tag ${item.segmentCount > 1 ? 'warn' : 'off'}">${item.segmentCount} 段</span><span class="mono seg-years">${escapeHtml(item.yearRangeText)}</span></td>
       <td class="note-cell">${escapeHtml(item.note)}</td>
       <td class="actions">
+        <button type="button" class="link" data-zone-detail="${escapeHtml(item.id)}">详情</button>
         <button type="button" class="link" data-zone-edit="${escapeHtml(item.id)}">编辑</button>
         <button type="button" class="link danger" data-zone-delete="${escapeHtml(item.id)}">删除</button>
       </td>
@@ -163,14 +166,38 @@ function renderConvertZoneOptions() {
   if (state.zones.some((item) => item.id === current)) select.value = current;
 }
 
+// ---- 偏移分段编辑器 -----------------------------------------------------
+
+function emptySegmentRow() {
+  return { fromYear: '', toYear: '', offsetMinutes: '' };
+}
+
+function renderSegmentRows() {
+  const box = el('segment-rows');
+  box.innerHTML = state.formSegments.map((seg, index) => `
+    <div class="segment-row">
+      <span class="seg-index">第 ${index + 1} 段${index === state.formSegments.length - 1 ? '<em>（最后一段）</em>' : ''}</span>
+      <label data-field="segments[${index}].fromYear"><input data-seg-index="${index}" data-seg-key="fromYear" value="${escapeHtml(seg.fromYear)}" placeholder="例如 1949" maxlength="4"></label>
+      <label data-field="segments[${index}].toYear"><input data-seg-index="${index}" data-seg-key="toYear" value="${escapeHtml(seg.toYear)}" placeholder="留空表示至今" maxlength="4"></label>
+      <label data-field="segments[${index}].offsetMinutes"><input data-seg-index="${index}" data-seg-key="offsetMinutes" value="${escapeHtml(seg.offsetMinutes)}" placeholder="例如 480" maxlength="6"></label>
+      <button type="button" class="link danger" data-seg-remove="${index}"${state.formSegments.length <= 1 ? ' disabled' : ''}>删除这一段</button>
+    </div>`).join('');
+}
+
+function syncSegmentInput(node) {
+  const index = Number(node.dataset.segIndex);
+  const key = node.dataset.segKey;
+  if (!state.formSegments[index]) return;
+  state.formSegments[index][key] = node.value.trim();
+}
+
 function openZoneForm(zone) {
   state.editingId = zone ? zone.id : '';
   el('zone-form-title').textContent = zone ? `编辑档案：${zone.name}` : '新建档案';
   el('zone-name').value = zone ? zone.name : '';
   el('zone-display').value = zone ? zone.displayName : '';
-  el('zone-offset').value = zone ? String(zone.offsetMinutes) : '';
   el('zone-uses-dst').checked = zone ? zone.usesDst : false;
-  el('zone-dst-offset').value = zone && zone.dstOffsetMinutes !== null ? String(zone.dstOffsetMinutes) : '';
+  el('zone-dst-offset').value = zone && zone.dstOffsetMinutes !== null && zone.dstOffsetMinutes !== undefined ? String(zone.dstOffsetMinutes) : '';
   const start = zone && zone.dstStart ? zone.dstStart : { month: 3, week: '2', weekday: 0, hour: 2, minute: 0 };
   const end = zone && zone.dstEnd ? zone.dstEnd : { month: 11, week: '1', weekday: 0, hour: 2, minute: 0 };
   el('zone-start-month').value = String(start.month);
@@ -183,15 +210,25 @@ function openZoneForm(zone) {
   el('zone-end-weekday').value = String(end.weekday);
   el('zone-end-hour').value = String(end.hour);
   el('zone-end-minute').value = String(end.minute);
-  el('zone-from-year').value = zone ? String(zone.fromYear) : '';
-  el('zone-to-year').value = zone && zone.toYear !== null ? String(zone.toYear) : '';
   el('zone-note').value = zone ? zone.note : '';
+  if (zone && Array.isArray(zone.segments) && zone.segments.length) {
+    state.formSegments = zone.segments.map((seg) => ({
+      fromYear: String(seg.fromYear),
+      toYear: seg.toYear === null ? '' : String(seg.toYear),
+      offsetMinutes: String(seg.offsetMinutes),
+    }));
+  } else {
+    state.formSegments = [emptySegmentRow()];
+  }
+  renderSegmentRows();
+  el('zone-detail').classList.add('hidden');
   el('zone-form').classList.remove('hidden');
   el('zone-name').focus();
 }
 
 function closeZoneForm() {
   state.editingId = '';
+  state.formSegments = [];
   el('zone-form').classList.add('hidden');
   clearFieldMarks();
 }
@@ -203,7 +240,11 @@ async function submitZone(event) {
   const payload = {
     name: el('zone-name').value,
     displayName: el('zone-display').value,
-    offsetMinutes: el('zone-offset').value,
+    segments: state.formSegments.map((seg) => ({
+      fromYear: seg.fromYear,
+      toYear: seg.toYear === '' ? null : seg.toYear,
+      offsetMinutes: seg.offsetMinutes,
+    })),
     usesDst: el('zone-uses-dst').checked,
     dstOffsetMinutes: el('zone-dst-offset').value === '' ? null : el('zone-dst-offset').value,
     dstStart: {
@@ -220,8 +261,6 @@ async function submitZone(event) {
       hour: el('zone-end-hour').value,
       minute: el('zone-end-minute').value,
     },
-    fromYear: el('zone-from-year').value,
-    toYear: el('zone-to-year').value === '' ? null : el('zone-to-year').value,
     note: el('zone-note').value,
   };
   if (!payload.usesDst) {
@@ -246,6 +285,75 @@ async function submitZone(event) {
   }
 }
 
+// ---- 档案详情：完整分段历史 + 按年查偏移 -------------------------------
+
+async function openZoneDetail(id) {
+  clearNotice();
+  try {
+    const zone = await request(`/api/zones/${encodeURIComponent(id)}`);
+    state.detailId = zone.id;
+    el('detail-title').textContent = `档案详情：${zone.name}`;
+    el('detail-year').value = '';
+    el('detail-year-result').textContent = '填上年份查询，年份落在哪一段就取哪一段的偏移';
+    el('detail-year-result').className = 'detail-year-result';
+    const segmentRows = zone.segments.map((seg, index) => `
+      <tr>
+        <td>第 ${index + 1} 段${seg.toYear === null ? ' <span class="tag on">当前</span>' : ''}</td>
+        <td class="mono">${escapeHtml(seg.yearsText)}</td>
+        <td class="mono">${escapeHtml(seg.offsetText)}</td>
+        <td class="mono">${seg.offsetMinutes} 分钟</td>
+      </tr>`).join('');
+    el('detail-body').innerHTML = `
+      <dl class="detail-grid">
+        <dt>时区名称</dt><dd class="mono">${escapeHtml(zone.name)}</dd>
+        <dt>显示名称</dt><dd>${escapeHtml(zone.displayName)}</dd>
+        <dt>当前偏移</dt><dd class="mono">${escapeHtml(zone.offsetText)}（${zone.offsetMinutes} 分钟）</dd>
+        <dt>整体生效年份</dt><dd class="mono">${escapeHtml(zone.yearRangeText)}</dd>
+        <dt>夏令时</dt><dd>${zone.usesDst ? `实行，夏令时偏移 <span class="mono">${escapeHtml(zone.dstOffsetText)}</span>，${escapeHtml(ruleText(zone.dstStart))} 起，${escapeHtml(ruleText(zone.dstEnd))} 止` : '不实行'}</dd>
+        <dt>备注</dt><dd>${escapeHtml(zone.note) || '—'}</dd>
+      </dl>
+      <h4>偏移分段历史（共 ${zone.segmentCount} 段）</h4>
+      <div class="table-wrap">
+        <table class="grid detail-table">
+          <thead><tr><th>段次</th><th>生效年份</th><th>偏移</th><th>分钟数</th></tr></thead>
+          <tbody>${segmentRows}</tbody>
+        </table>
+      </div>`;
+    el('zone-form').classList.add('hidden');
+    el('zone-detail').classList.remove('hidden');
+  } catch (err) {
+    notify(err.message, 'error');
+  }
+}
+
+async function lookupDetailYear() {
+  clearNotice();
+  const result = el('detail-year-result');
+  if (!state.detailId) return;
+  const year = el('detail-year').value.trim();
+  if (!year) {
+    result.textContent = '请先填写要查询的年份';
+    result.className = 'detail-year-result bad';
+    return;
+  }
+  try {
+    const data = await request(`/api/zones/${encodeURIComponent(state.detailId)}/offset?year=${encodeURIComponent(year)}`);
+    if (data.available) {
+      result.textContent = `${data.year} 年落在「${data.segmentYearsText}」这一段，实际偏移 ${data.offsetText}（${data.offsetMinutes} 分钟）`;
+      result.className = 'detail-year-result ok';
+    } else {
+      result.textContent = `${data.year} 年不可用：${data.reason}`;
+      result.className = 'detail-year-result bad';
+    }
+  } catch (err) {
+    result.textContent = err.message;
+    result.className = 'detail-year-result bad';
+    markField(err.field);
+  }
+}
+
+// ---- 换算台 -------------------------------------------------------------
+
 async function runConvert() {
   clearNotice();
   const payload = {
@@ -264,26 +372,37 @@ async function runConvert() {
 }
 
 function renderConvert(result) {
-  el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.offsetText}）的 ${result.input.date} ${result.input.time}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${Math.floor(result.maxDiffMinutes / 60)} 小时 ${result.maxDiffMinutes % 60} 分`;
+  const maxHour = Math.floor(result.maxDiffMinutes / 60);
+  const maxMinute = result.maxDiffMinutes % 60;
+  const unavailableNote = result.unavailableCount > 0
+    ? `；${result.unavailableCount} 条在 ${result.input.year} 年没有分段覆盖，按不可用处理`
+    : '';
+  el('convert-meta').textContent = `来源 ${result.input.zoneName}（${result.input.zoneDisplayName}，${result.input.year} 年落在「${result.input.sourceSegmentYearsText}」段，偏移 ${result.input.offsetText}）的 ${result.input.date} ${result.input.time}，换算时刻 ${formatTime(result.convertedAt)}；参与换算的档案 ${result.zonesInScope} 条，可用 ${result.availableCount} 条，与来源不同天的有 ${result.crossDayCount} 条，最大时差 ${maxHour} 小时 ${maxMinute} 分${unavailableNote}`;
   const body = el('convert-body');
-  body.innerHTML = result.results.map((item) => `<tr class="${item.isSource ? 'source-row' : ''}">
+  body.innerHTML = result.results.map((item) => `<tr class="${item.isSource ? 'source-row' : ''}${item.available ? '' : ' unavailable-row'}">
       <td class="mono">${escapeHtml(item.name)}</td>
       <td>${escapeHtml(item.displayName)}</td>
-      <td class="mono">${escapeHtml(item.localDate)}</td>
-      <td class="mono">${escapeHtml(item.localTime)}</td>
-      <td>${escapeHtml(item.weekday)}</td>
-      <td><span class="tag ${item.dayOffset === 0 ? 'off' : 'warn'}">${escapeHtml(item.dayOffsetText)}</span></td>
-      <td class="mono">${escapeHtml(item.offsetText)}</td>
-      <td>${escapeHtml(item.diffText)}</td>
+      <td class="mono">${item.available ? escapeHtml(item.localDate) : '—'}</td>
+      <td class="mono">${item.available ? escapeHtml(item.localTime) : '—'}</td>
+      <td>${item.available ? escapeHtml(item.weekday) : '—'}</td>
+      <td><span class="tag ${item.available ? (item.dayOffset === 0 ? 'off' : 'warn') : 'off'}">${escapeHtml(item.dayOffsetText)}</span></td>
+      <td class="mono">${item.available ? escapeHtml(item.offsetText) : '<span class="tag off">不可用</span>'}</td>
+      <td class="mono">${item.available ? escapeHtml(item.segmentYearsText) : '—'}</td>
+      <td class="reason-cell"${item.available ? '' : ` title="${escapeHtml(item.unavailableReason)}"`}>${item.available ? escapeHtml(item.diffText) : `<span class="unavailable-reason">${escapeHtml(item.unavailableReason)}</span>`}</td>
       <td>${item.usesDst ? '有规则' : '—'}</td>
     </tr>`).join('');
   el('convert-empty').classList.toggle('hidden', result.results.length > 0);
 }
 
-// 列表上的操作用事件委托统一处理，列表重绘之后不需要重新绑定
+// 列表与分段编辑器上的操作用事件委托统一处理，重绘之后不需要重新绑定
 document.addEventListener('click', async (event) => {
   const node = event.target.closest('button');
   if (!node) return;
+
+  if (node.dataset.zoneDetail) {
+    await openZoneDetail(node.dataset.zoneDetail);
+    return;
+  }
 
   if (node.dataset.zoneEdit) {
     clearNotice();
@@ -299,12 +418,34 @@ document.addEventListener('click', async (event) => {
     try {
       await request(`/api/zones/${encodeURIComponent(node.dataset.zoneDelete)}`, { method: 'DELETE' });
       if (state.editingId === node.dataset.zoneDelete) closeZoneForm();
+      if (state.detailId === node.dataset.zoneDelete) el('zone-detail').classList.add('hidden');
       notify('时区档案已删除', 'ok');
       await loadZones();
     } catch (err) {
       notify(err.message, 'error');
     }
+    return;
   }
+
+  if (node.id === 'segment-add') {
+    state.formSegments.push(emptySegmentRow());
+    renderSegmentRows();
+    return;
+  }
+
+  if (node.dataset.segRemove !== undefined) {
+    const index = Number(node.dataset.segRemove);
+    if (state.formSegments.length > 1) {
+      state.formSegments.splice(index, 1);
+      renderSegmentRows();
+    }
+  }
+});
+
+// 分段输入框的输入实时同步回内存里的分段表
+el('segment-rows').addEventListener('input', (event) => {
+  const input = event.target.closest('input[data-seg-index]');
+  if (input) syncSegmentInput(input);
 });
 
 el('zone-form').addEventListener('submit', submitZone);
@@ -313,6 +454,17 @@ el('zone-new').addEventListener('click', () => {
   openZoneForm(null);
 });
 el('zone-cancel').addEventListener('click', closeZoneForm);
+el('detail-close').addEventListener('click', () => {
+  state.detailId = '';
+  el('zone-detail').classList.add('hidden');
+});
+el('detail-year-run').addEventListener('click', lookupDetailYear);
+el('detail-year').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    lookupDetailYear();
+  }
+});
 el('zone-filter-apply').addEventListener('click', () => {
   clearNotice();
   loadZones().catch((err) => notify(err.message, 'error'));
