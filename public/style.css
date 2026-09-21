@@ -374,3 +374,177 @@ label.full input {
   display: flex;
   gap: 10px;
 }
+
+/* 偏移分段编辑器 */
+.periods-box {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.periods-box.invalid {
+  border-color: var(--danger);
+  background: #fdf3f3;
+}
+
+.periods-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.periods-title {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.periods-hint {
+  flex: 1;
+  min-width: 220px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.period-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.period-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.period-index {
+  min-width: 56px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.period-row label {
+  min-width: 130px;
+  flex: 0 1 150px;
+}
+
+.p-preview {
+  min-width: 92px;
+  padding-bottom: 7px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.period-row .p-del {
+  margin-left: auto;
+  padding-bottom: 7px;
+}
+
+.period-transition {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+/* 档案详情弹窗 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 41, 51, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow-y: auto;
+  z-index: 20;
+}
+
+.modal {
+  width: 100%;
+  max-width: 720px;
+  background: var(--panel);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 30px rgba(31, 41, 51, 0.2);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 14px 18px 18px;
+}
+
+.modal-body h4 {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.detail-list dt {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+
+.detail-list dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.detail-muted {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.detail-table {
+  min-width: 0;
+}
+
+.detail-table tr.current-period td {
+  background: var(--accent-soft);
+}
+
+/* 换算结果里该年不可用的行 */
+tr.unavailable-row td {
+  background: #faf6f6;
+  color: var(--ink-soft);
+}
+
+.tag.danger-tag {
+  background: #fdeeee;
+  color: var(--danger);
+}
+
+td.unavailable-reason {
+  white-space: normal;
+  color: var(--danger);
+  font-size: 12px;
+}

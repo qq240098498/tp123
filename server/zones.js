@@ -1,5 +1,9 @@
 const crypto = require('crypto');
-const { load, save, MIN_OFFSET, MAX_OFFSET, MIN_YEAR, MAX_YEAR, MAX_NAME_LENGTH, MAX_DISPLAY_NAME_LENGTH, MAX_NOTE_LENGTH } = require('./store');
+const {
+  load, save,
+  MIN_OFFSET, MAX_OFFSET, MIN_YEAR, MAX_YEAR,
+  MAX_NAME_LENGTH, MAX_DISPLAY_NAME_LENGTH, MAX_NOTE_LENGTH, MAX_PERIODS,
+} = require('./store');
 const { ApiError, pickText } = require('./errors');
 
 // 时区名固定成地区加城市的写法，UTC 单独允许
@@ -73,8 +77,12 @@ function sameRulePart(a, b) {
     && a.hour === b.hour && a.minute === b.minute;
 }
 
-function validateYear(value, field, label) {
-  if (value === undefined || value === null || value === '') return null;
+// 夏令时的生效年份允许留空，空表示不限；偏移分段的开始年份不允许空
+function validateYear(value, field, label, { required = false } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw new ApiError(400, 'YEAR_REQUIRED', `${label}要填 ${MIN_YEAR} 到 ${MAX_YEAR} 之间的整数`, field);
+    return null;
+  }
   const year = Number(value);
   if (!Number.isInteger(year) || year < MIN_YEAR || year > MAX_YEAR) {
     throw new ApiError(400, 'YEAR_INVALID', `${label}要填 ${MIN_YEAR} 到 ${MAX_YEAR} 之间的整数`, field);
@@ -91,52 +99,6 @@ function validateNote(value) {
   return value.trim();
 }
 
-// 一整条档案的校验：偏移、夏令时三段与生效年份要能对得上
-function validatePayload(input, data, selfId) {
-  const name = validateName(input.name, data, selfId);
-  const displayName = validateDisplayName(input.displayName);
-  const offsetMinutes = validateOffset(input.offsetMinutes, 'offsetMinutes');
-  const usesDst = input.usesDst === true || input.usesDst === 'true';
-  const fromYear = validateYear(input.fromYear, 'fromYear', '开始年份');
-  const toYear = validateYear(input.toYear, 'toYear', '结束年份');
-
-  if (fromYear !== null && toYear !== null && toYear < fromYear) {
-    throw new ApiError(400, 'YEAR_RANGE_INVALID', '结束年份不能早于开始年份', 'toYear');
-  }
-
-  let dstOffsetMinutes = null;
-  let dstStart = null;
-  let dstEnd = null;
-
-  if (usesDst) {
-    dstOffsetMinutes = validateOffset(input.dstOffsetMinutes, 'dstOffsetMinutes');
-    if (dstOffsetMinutes <= offsetMinutes) {
-      throw new ApiError(400, 'DST_OFFSET_INVALID', '夏令时偏移要比标准偏移更靠前，也就是数值更大', 'dstOffsetMinutes');
-    }
-    if (!input.dstStart || !input.dstEnd) {
-      throw new ApiError(400, 'DST_RULE_REQUIRED', '实行夏令时的时区要把开始与结束两段规则都填上', 'dstStart');
-    }
-    dstStart = validateRulePart(input.dstStart, 'dstStart');
-    dstEnd = validateRulePart(input.dstEnd, 'dstEnd');
-    if (sameRulePart(dstStart, dstEnd)) {
-      throw new ApiError(400, 'DST_RULE_SAME', '开始与结束两段规则不能完全相同，否则推算不出切换区间', 'dstEnd');
-    }
-  }
-
-  return {
-    name,
-    displayName,
-    offsetMinutes,
-    usesDst,
-    dstOffsetMinutes,
-    dstStart,
-    dstEnd,
-    fromYear: fromYear === null ? MIN_YEAR : fromYear,
-    toYear,
-    note: validateNote(input.note),
-  };
-}
-
 // 偏移的展示写法，半小时与三刻都要看得清
 function offsetText(minutes) {
   const sign = minutes < 0 ? '-' : '+';
@@ -146,18 +108,214 @@ function offsetText(minutes) {
   return `UTC${sign}${hour}:${minute}`;
 }
 
+function periodRangeText(period) {
+  return period.toYear === null ? `${period.fromYear} 年起` : `${period.fromYear} 至 ${period.toYear} 年`;
+}
+
+// 报错时用来指明是哪一段：区间加偏移
+function periodLabel(period) {
+  return `${periodRangeText(period)}（${offsetText(period.offsetMinutes)}）`;
+}
+
+function gapYearsText(from, to) {
+  return from === to ? `${from} 年` : `${from} 至 ${to} 年`;
+}
+
+// 偏移分段的校验：每段自身要合法，段与段之间既不能撞上也不能空着年份
+function validatePeriods(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ApiError(400, 'PERIODS_REQUIRED', '至少要登记一个偏移分段，写清开始年份与这段期间的偏移', 'offsetPeriods');
+  }
+  if (value.length > MAX_PERIODS) {
+    throw new ApiError(400, 'PERIODS_TOO_MANY', `一条档案最多登记 ${MAX_PERIODS} 个偏移分段`, 'offsetPeriods');
+  }
+
+  const periods = value.map((raw, index) => {
+    const ordinal = `第 ${index + 1} 段`;
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const fromYear = validateYear(source.fromYear, 'offsetPeriods', `${ordinal}的开始年份`, { required: true });
+    const toYear = validateYear(source.toYear, 'offsetPeriods', `${ordinal}的结束年份`);
+    if (toYear !== null && toYear < fromYear) {
+      throw new ApiError(400, 'PERIOD_RANGE_INVALID', `${ordinal}的结束年份不能早于开始年份（${fromYear} 至 ${toYear} 年）`, 'offsetPeriods');
+    }
+    const offsetMinutes = validateOffset(source.offsetMinutes, 'offsetPeriods');
+    return { fromYear, toYear, offsetMinutes };
+  });
+
+  // 按开始年份排好再逐对检查，开始年份相同的两段天然撞在同一年
+  const sorted = periods.slice().sort((a, b) => a.fromYear - b.fromYear);
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const current = sorted[i];
+    const next = sorted[i + 1];
+
+    if (current.toYear === null) {
+      throw new ApiError(
+        400,
+        'PERIODS_OVERLAP',
+        `${periodLabel(current)}没有结束年份，后面又接了${periodLabel(next)}：开放至今的分段只能放在最后，这两段在 ${next.fromYear} 年撞上了`,
+        'offsetPeriods',
+      );
+    }
+    if (next.fromYear <= current.toYear) {
+      const overlapEnd = Math.min(current.toYear, next.toYear === null ? MAX_YEAR : next.toYear);
+      throw new ApiError(
+        400,
+        'PERIODS_OVERLAP',
+        `${periodLabel(current)}与${periodLabel(next)}重叠，${gapYearsText(next.fromYear, overlapEnd)}这几年被两段同时占着`,
+        'offsetPeriods',
+      );
+    }
+    if (next.fromYear > current.toYear + 1) {
+      throw new ApiError(
+        400,
+        'PERIODS_GAP',
+        `${periodLabel(current)}到 ${current.toYear} 年结束，${periodLabel(next)}到 ${next.fromYear} 年才接上，中间 ${gapYearsText(current.toYear + 1, next.fromYear - 1)}没有任何分段覆盖`,
+        'offsetPeriods',
+      );
+    }
+  }
+  return sorted;
+}
+
+// 夏令时生效年份：留空表示不限；填了就要落在偏移分段已经覆盖到的年份里
+function validateDstYear(value, field, label, periods) {
+  const year = validateYear(value, field, label);
+  if (year === null) return null;
+  const covered = periods.some((period) => year >= period.fromYear
+    && (period.toYear === null || year <= period.toYear));
+  if (!covered) {
+    throw new ApiError(400, 'DST_YEAR_UNCOVERED', `${label}${year} 年不在任何一个偏移分段的覆盖年份里，先把偏移分段补齐再登记夏令时`, field);
+  }
+  return year;
+}
+
+// 一整条档案的校验：偏移分段、夏令时三段与夏令时生效年份要能对得上
+function validatePayload(input, data, selfId) {
+  const name = validateName(input.name, data, selfId);
+  const displayName = validateDisplayName(input.displayName);
+  const offsetPeriods = validatePeriods(input.offsetPeriods);
+  const usesDst = input.usesDst === true || input.usesDst === 'true';
+
+  let dstOffsetMinutes = null;
+  let dstStart = null;
+  let dstEnd = null;
+  let dstFromYear = null;
+  let dstToYear = null;
+
+  if (usesDst) {
+    dstOffsetMinutes = validateOffset(input.dstOffsetMinutes, 'dstOffsetMinutes');
+    // 夏令时偏移要比它生效期间每一段标准偏移都更靠前，找出第一个不满足的段说明白
+    const worse = offsetPeriods.find((period) => dstOffsetMinutes <= period.offsetMinutes);
+    if (worse) {
+      throw new ApiError(
+        400,
+        'DST_OFFSET_INVALID',
+        `夏令时偏移 ${offsetText(dstOffsetMinutes)} 不比${periodRangeText(worse)}那段标准偏移 ${offsetText(worse.offsetMinutes)} 更靠前（数值要更大）`,
+        'dstOffsetMinutes',
+      );
+    }
+    if (!input.dstStart || !input.dstEnd) {
+      throw new ApiError(400, 'DST_RULE_REQUIRED', '实行夏令时的时区要把开始与结束两段规则都填上', 'dstStart');
+    }
+    dstStart = validateRulePart(input.dstStart, 'dstStart');
+    dstEnd = validateRulePart(input.dstEnd, 'dstEnd');
+    if (sameRulePart(dstStart, dstEnd)) {
+      throw new ApiError(400, 'DST_RULE_SAME', '开始与结束两段规则不能完全相同，否则推算不出切换区间', 'dstEnd');
+    }
+    dstFromYear = validateDstYear(input.dstFromYear, 'dstFromYear', '夏令时开始年份', offsetPeriods);
+    dstToYear = validateDstYear(input.dstToYear, 'dstToYear', '夏令时结束年份', offsetPeriods);
+    if (dstFromYear !== null && dstToYear !== null && dstToYear < dstFromYear) {
+      throw new ApiError(400, 'YEAR_RANGE_INVALID', '夏令时结束年份不能早于开始年份', 'dstToYear');
+    }
+  }
+
+  return {
+    name,
+    displayName,
+    offsetPeriods,
+    usesDst,
+    dstOffsetMinutes,
+    dstStart,
+    dstEnd,
+    dstFromYear,
+    dstToYear,
+    note: validateNote(input.note),
+  };
+}
+
+// 最新一段（开始年份最晚，通常开放至今）的偏移当作这条档案的当前偏移
+function currentPeriod(zone) {
+  return zone.offsetPeriods[zone.offsetPeriods.length - 1];
+}
+
+// 某一年落在哪一段；一年最多落在一段，落不进来返回 null
+function findPeriodAt(zone, year) {
+  const periods = zone.offsetPeriods;
+  for (let i = 0; i < periods.length; i += 1) {
+    const period = periods[i];
+    if (year >= period.fromYear && (period.toYear === null || year <= period.toYear)) {
+      return { period, index: i };
+    }
+  }
+  return null;
+}
+
+// 年份没有被任何分段覆盖时给出原因：在最早一段之前、最后一段之后，或两段之间空着
+function uncoveredReason(zone, year) {
+  const name = zone.name;
+  const periods = zone.offsetPeriods;
+  for (let i = 0; i < periods.length; i += 1) {
+    const period = periods[i];
+    if (year < period.fromYear) {
+      if (i === 0) {
+        return `${name} 的偏移分段从 ${period.fromYear} 年才开始登记，${year} 年在最早一段之前，没有这一年的偏移记录`;
+      }
+      const prev = periods[i - 1];
+      return `${name} 的偏移在 ${prev.toYear} 年到 ${period.fromYear} 年之间空着，${year} 年没有任何分段覆盖（${periodRangeText(prev)}与${periodRangeText(period)}之间的空档）`;
+    }
+    if (year <= (period.toYear === null ? MAX_YEAR : period.toYear)) return null;
+  }
+  const last = periods[periods.length - 1];
+  return `${name} 的偏移分段只登记到 ${last.toYear} 年，${year} 年在最后一段之后，没有这一年的偏移记录`;
+}
+
 function withOffsetText(zone) {
+  const periods = zone.offsetPeriods.map((period, index) => ({
+    ...period,
+    index,
+    offsetText: offsetText(period.offsetMinutes),
+    rangeText: periodRangeText(period),
+  }));
+  const current = currentPeriod(zone);
+  const first = zone.offsetPeriods[0];
+  const coverageEnd = current.toYear === null ? null : current.toYear;
   return {
     ...zone,
-    offsetText: offsetText(zone.offsetMinutes),
+    offsetPeriods: periods,
+    offsetMinutes: current.offsetMinutes,
+    offsetText: offsetText(current.offsetMinutes),
+    periodCount: periods.length,
+    coverageStartYear: first.fromYear,
+    coverageEndYear: coverageEnd,
+    coverageText: coverageEnd === null
+      ? `${first.fromYear} 年起，分 ${periods.length} 段`
+      : `${first.fromYear} 至 ${coverageEnd} 年，分 ${periods.length} 段`,
     dstOffsetText: zone.usesDst && zone.dstOffsetMinutes !== null ? offsetText(zone.dstOffsetMinutes) : '',
-    yearRangeText: zone.toYear === null ? `${zone.fromYear} 年起` : `${zone.fromYear} 至 ${zone.toYear}`,
+    dstYearRangeText: zone.usesDst
+      ? (zone.dstToYear === null
+        ? (zone.dstFromYear === null ? '长期实行' : `${zone.dstFromYear} 年起`)
+        : (zone.dstFromYear === null
+          ? `至 ${zone.dstToYear} 年止（开始年份不限）`
+          : `${zone.dstFromYear} 至 ${zone.dstToYear}`))
+      : '',
   };
 }
 
 function sortZones(list) {
   return list.slice().sort((a, b) => {
-    if (a.offsetMinutes !== b.offsetMinutes) return a.offsetMinutes - b.offsetMinutes;
+    const offsetA = currentPeriod(a).offsetMinutes;
+    const offsetB = currentPeriod(b).offsetMinutes;
+    if (offsetA !== offsetB) return offsetA - offsetB;
     return a.name < b.name ? -1 : 1;
   });
 }
@@ -213,13 +371,13 @@ function updateZone(id, payload) {
   const merged = {
     name: input.name === undefined ? found.name : input.name,
     displayName: input.displayName === undefined ? found.displayName : input.displayName,
-    offsetMinutes: input.offsetMinutes === undefined ? found.offsetMinutes : input.offsetMinutes,
+    offsetPeriods: input.offsetPeriods === undefined ? found.offsetPeriods : input.offsetPeriods,
     usesDst: input.usesDst === undefined ? found.usesDst : (input.usesDst === true || input.usesDst === 'true'),
     dstOffsetMinutes: input.dstOffsetMinutes === undefined ? found.dstOffsetMinutes : input.dstOffsetMinutes,
     dstStart: input.dstStart === undefined ? found.dstStart : input.dstStart,
     dstEnd: input.dstEnd === undefined ? found.dstEnd : input.dstEnd,
-    fromYear: input.fromYear === undefined ? found.fromYear : input.fromYear,
-    toYear: input.toYear === undefined ? found.toYear : input.toYear,
+    dstFromYear: input.dstFromYear === undefined ? found.dstFromYear : input.dstFromYear,
+    dstToYear: input.dstToYear === undefined ? found.dstToYear : input.dstToYear,
     note: input.note === undefined ? found.note : input.note,
   };
 
@@ -246,5 +404,8 @@ module.exports = {
   updateZone,
   deleteZone,
   offsetText,
+  periodRangeText,
+  findPeriodAt,
+  uncoveredReason,
   withOffsetText,
 };

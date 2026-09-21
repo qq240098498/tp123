@@ -10,7 +10,7 @@
   <header class="topbar">
     <div>
       <h1>时区与时间换算工作台</h1>
-      <p class="subtitle">登记各地时区与夏令时规则，把一个时刻换算到所有时区，看清华盛顿与上海谁先跨天</p>
+      <p class="subtitle">登记各地时区的偏移分段历史与夏令时规则，按年份把一个时刻换算到所有时区，看清华盛顿与上海谁先跨天</p>
     </div>
     <div class="topbar-right">
       <label class="operator" data-field="operator">当前操作者
@@ -46,11 +46,12 @@
             <tr>
               <th>时区名称</th>
               <th>显示名称</th>
-              <th>标准偏移</th>
+              <th>当前偏移</th>
+              <th>偏移分段</th>
               <th>夏令时</th>
               <th>夏令时偏移</th>
               <th>切换规则</th>
-              <th>生效年份</th>
+              <th>夏令时生效年份</th>
               <th>备注</th>
               <th>操作</th>
             </tr>
@@ -65,8 +66,17 @@
         <div class="form-row">
           <label data-field="name">时区名称<input id="zone-name" placeholder="例如 Asia/Tokyo" maxlength="40"></label>
           <label data-field="displayName">显示名称<input id="zone-display" placeholder="例如 日本标准时间" maxlength="40"></label>
-          <label data-field="offsetMinutes">标准偏移（分钟）<input id="zone-offset" placeholder="例如东八区填 480" maxlength="6"></label>
         </div>
+
+        <div class="periods-box" data-field="offsetPeriods">
+          <div class="periods-head">
+            <span class="periods-title">偏移分段历史</span>
+            <span class="periods-hint">按年份顺序登记，一段写清开始年份、结束年份与这段期间的偏移；最后一段的结束年份留空表示至今。段与段之间不能重叠，也不能空出年份</span>
+            <button type="button" id="period-add" class="ghost">再加一段</button>
+          </div>
+          <div class="period-rows" id="period-rows"></div>
+        </div>
+
         <div class="form-row">
           <label class="check" data-field="usesDst"><input type="checkbox" id="zone-uses-dst"> 实行夏令时</label>
           <label data-field="dstOffsetMinutes">夏令时偏移（分钟）<input id="zone-dst-offset" placeholder="例如 540" maxlength="6"></label>
@@ -88,8 +98,8 @@
           <label>分<input id="zone-end-minute" placeholder="0" maxlength="2"></label>
         </div>
         <div class="form-row">
-          <label data-field="fromYear">开始年份<input id="zone-from-year" placeholder="例如 1971" maxlength="4"></label>
-          <label data-field="toYear">结束年份<input id="zone-to-year" placeholder="留空表示至今" maxlength="4"></label>
+          <label data-field="dstFromYear">夏令时开始年份<input id="zone-dst-from-year" placeholder="留空表示不限" maxlength="4"></label>
+          <label data-field="dstToYear">夏令时结束年份<input id="zone-dst-to-year" placeholder="留空表示至今" maxlength="4"></label>
           <label class="full" data-field="note">备注<input id="zone-note" placeholder="这条档案有什么需要留意的" maxlength="200"></label>
         </div>
         <div class="form-actions">
@@ -109,7 +119,7 @@
           <button type="button" id="convert-run">换算一遍</button>
         </div>
       </div>
-      <p class="convert-meta" id="convert-meta">还没有换算过，填好日期、时刻与来源时区点右侧按钮</p>
+      <p class="convert-meta" id="convert-meta">还没有换算过，填好日期、时刻与来源时区点右侧按钮；每个时区按输入的年份落在哪一段取偏移，该年没有分段覆盖的时区按不可用列出</p>
       <div class="table-wrap">
         <table class="grid">
           <thead>
@@ -120,7 +130,8 @@
               <th>当地时刻</th>
               <th>星期</th>
               <th>与来源同天</th>
-              <th>偏移</th>
+              <th>该年所用偏移</th>
+              <th>落在分段</th>
               <th>与来源时区相差</th>
               <th>夏令时</th>
             </tr>
@@ -131,6 +142,16 @@
       <p class="empty-tip hidden" id="convert-empty">还没有换算结果</p>
     </section>
   </main>
+
+  <div class="modal-mask hidden" id="detail-mask">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="modal-head">
+        <h3 id="detail-title">档案详情</h3>
+        <button type="button" class="ghost" id="detail-close">关闭</button>
+      </div>
+      <div class="modal-body" id="detail-body"></div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

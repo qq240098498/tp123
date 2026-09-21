@@ -1,6 +1,6 @@
 const { load, WEEKDAY_NAMES } = require('./store');
 const { ApiError, pickText } = require('./errors');
-const { offsetText } = require('./zones');
+const { offsetText, periodRangeText, findPeriodAt, uncoveredReason } = require('./zones');
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -55,7 +55,7 @@ function dayOffsetText(dayOffset) {
   return `前 ${Math.abs(dayOffset)} 天`;
 }
 
-// 换算：先把输入时刻按来源时区的偏移折算成基准时刻，再逐个时区加上各自的偏移
+// 换算：先按来源时区在输入年份那一段的偏移折成基准时刻，再逐个时区取该年所在段的偏移
 function convert(options) {
   const input = options && typeof options === 'object' ? options : {};
   const date = validateDate(input.date);
@@ -67,22 +67,51 @@ function convert(options) {
   const source = data.zones.find((item) => item.id === zoneId);
   if (!source) throw new ApiError(404, 'ZONE_NOT_FOUND', '选中的时区没有登记过', 'zoneId');
 
+  // 来源时区在输入年份落在哪一段：落不进来就没法把输入时刻折成基准时刻，整个换算不成立
+  const sourceHit = findPeriodAt(source, date.year);
+  if (!sourceHit) {
+    const reason = uncoveredReason(source, date.year);
+    throw new ApiError(400, 'CONVERT_YEAR_UNCOVERED', reason, 'date');
+  }
+  const sourceOffset = sourceHit.period.offsetMinutes;
+
   const baseMs = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute);
-  const utcMs = baseMs - source.offsetMinutes * 60000;
+  const utcMs = baseMs - sourceOffset * 60000;
   const baseDay = Math.floor(baseMs / DAY_MS);
   const utcDate = new Date(utcMs);
 
-  const results = data.zones.map((zone) => {
-    const localMs = utcMs + zone.offsetMinutes * 60000;
+  const available = [];
+  const unavailable = [];
+
+  data.zones.forEach((zone) => {
+    const hit = findPeriodAt(zone, date.year);
+    if (!hit) {
+      unavailable.push({
+        zoneId: zone.id,
+        name: zone.name,
+        displayName: zone.displayName,
+        usesDst: zone.usesDst,
+        isSource: zone.id === source.id,
+        available: false,
+        unavailableReason: uncoveredReason(zone, date.year),
+      });
+      return;
+    }
+
+    const { period, index } = hit;
+    const localMs = utcMs + period.offsetMinutes * 60000;
     const local = new Date(localMs);
     const dayOffset = Math.floor(localMs / DAY_MS) - baseDay;
-    const diffMinutes = zone.offsetMinutes - source.offsetMinutes;
-    return {
+    const diffMinutes = period.offsetMinutes - sourceOffset;
+    available.push({
       zoneId: zone.id,
       name: zone.name,
       displayName: zone.displayName,
-      offsetMinutes: zone.offsetMinutes,
-      offsetText: offsetText(zone.offsetMinutes),
+      available: true,
+      periodIndex: index,
+      periodRangeText: periodRangeText(period),
+      offsetMinutes: period.offsetMinutes,
+      offsetText: offsetText(period.offsetMinutes),
       localDate: `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())}`,
       localTime: `${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`,
       weekday: WEEKDAY_NAMES[local.getUTCDay()],
@@ -92,22 +121,26 @@ function convert(options) {
       diffText: diffText(diffMinutes),
       usesDst: zone.usesDst,
       isSource: zone.id === source.id,
-    };
+    });
   });
 
-  results.sort((a, b) => {
+  available.sort((a, b) => {
     if (a.offsetMinutes !== b.offsetMinutes) return a.offsetMinutes - b.offsetMinutes;
     return a.name < b.name ? -1 : 1;
   });
+  unavailable.sort((a, b) => (a.name < b.name ? -1 : 1));
+  const results = available.concat(unavailable);
 
   return {
     input: {
       date: date.text,
+      year: date.year,
       time: time.text,
       zoneId: source.id,
       zoneName: source.name,
       zoneDisplayName: source.displayName,
-      offsetText: offsetText(source.offsetMinutes),
+      offsetText: offsetText(sourceOffset),
+      sourcePeriodText: periodRangeText(sourceHit.period),
       usesDst: source.usesDst,
     },
     standard: {
@@ -115,8 +148,10 @@ function convert(options) {
       time: `${pad(utcDate.getUTCHours())}:${pad(utcDate.getUTCMinutes())}`,
     },
     zonesInScope: data.zones.length,
-    crossDayCount: results.filter((item) => item.dayOffset !== 0).length,
-    maxDiffMinutes: results.reduce((acc, item) => Math.max(acc, Math.abs(item.diffMinutes)), 0),
+    availableCount: available.length,
+    unavailableCount: unavailable.length,
+    crossDayCount: available.filter((item) => item.dayOffset !== 0).length,
+    maxDiffMinutes: available.reduce((acc, item) => Math.max(acc, Math.abs(item.diffMinutes)), 0),
     results,
     convertedAt: new Date().toISOString(),
   };
